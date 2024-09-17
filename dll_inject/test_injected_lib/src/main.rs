@@ -1,37 +1,21 @@
 use std::env;
 use std::ffi::CString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use windows::core::PCSTR;
 use windows::Win32::Foundation::{GetLastError, HMODULE};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 
 type MyFunction = unsafe extern "C" fn();
 const DLL_PATH: &str = "src/injected_lib.dll";
+const DLL_ENTRY_POINT: &str = "TestExport";
 
-fn get_dll_address<P: AsRef<Path>>(path: P) -> HMODULE {
-    let current_dir: PathBuf = env::current_dir().unwrap();
-    let mut dll_path = current_dir.clone();
-    dll_path.push(path);
-
-    let dll_path_c = CString::new(dll_path.to_str().unwrap()).unwrap();
-    let dll_path_ptr = dll_path_c.as_bytes_with_nul().as_ptr() as *const u8;
-    let dll_path_pcstr = PCSTR::from_raw(dll_path_ptr);
-    let address_result = unsafe { LoadLibraryA(dll_path_pcstr) };
-    let address = match address_result {
-        Ok(address) => address,
-        Err(e) => {
-            panic!("LoadLibraryA failed {}", e);
-        }
-    };
-    if address_result.is_err() {
-        let error_code = unsafe { GetLastError() };
-        panic!("LoadLibraryA failed with error code: {:?}", error_code);
-    }
-    address
-}
 fn main() {
     let dll_address = get_dll_address(DLL_PATH);
-    let func_name = CString::new("TestExport").unwrap();
+    execute_dll(dll_address, DLL_ENTRY_POINT);
+}
+
+fn execute_dll(dll_address: HMODULE, entry_point: &str) {
+    let func_name = CString::new(entry_point).unwrap();
     let func_name_ptr = func_name.as_bytes_with_nul().as_ptr() as *const u8;
     let func_nam_pcstr = PCSTR::from_raw(func_name_ptr);
 
@@ -52,6 +36,28 @@ fn main() {
     }
 }
 
+fn get_dll_address(path: &str) -> HMODULE {
+    let current_dir: PathBuf = env::current_dir().unwrap();
+    let mut dll_path = current_dir.clone();
+    dll_path.push(path);
+
+    let dll_path_c = CString::new(dll_path.to_str().unwrap()).unwrap();
+    let dll_path_ptr = dll_path_c.as_bytes_with_nul().as_ptr() as *const u8;
+    let dll_path_pcstr = PCSTR::from_raw(dll_path_ptr);
+    let address_result = unsafe { LoadLibraryA(dll_path_pcstr) };
+    let address = match address_result {
+        Ok(address) => address,
+        Err(e) => {
+            panic!("LoadLibraryA failed {}", e);
+        }
+    };
+    if address_result.is_err() {
+        let error_code = unsafe { GetLastError() };
+        panic!("LoadLibraryA failed with error code: {:?}", error_code);
+    }
+    address
+}
+
 #[cfg(test)]
 mod injected_lib_tests {
     use super::*;
@@ -67,5 +73,15 @@ mod injected_lib_tests {
     #[test]
     fn test_get_dll_address() {
         get_dll_address(DLL_PATH);
+    }
+
+    #[test]
+    fn test_execute_dll() {
+        execute_dll(get_dll_address(DLL_PATH), DLL_ENTRY_POINT);
+    }
+    #[test]
+    #[should_panic(expected = "Dll not found")]
+    fn test_execute_dll_panic() {
+        execute_dll(get_dll_address(DLL_PATH), "not existing entry point");
     }
 }
