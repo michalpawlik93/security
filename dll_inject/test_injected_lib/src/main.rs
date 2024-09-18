@@ -1,87 +1,177 @@
-use std::env;
-use std::ffi::CString;
-use std::path::PathBuf;
-use windows::core::PCSTR;
-use windows::Win32::Foundation::{GetLastError, HMODULE};
-use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
+use std::ffi::c_void;
+use std::io;
+use std::str::FromStr;
+use windows::core::{PCSTR, PCWSTR};
+use windows::Win32::Foundation::{CloseHandle, GetLastError};
+use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+use windows::Win32::System::Memory::{
+    VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_EXECUTE_READWRITE,
+};
+use windows::Win32::System::Threading::{
+    CreateRemoteThread, OpenProcess, PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
+};
+mod dll;
 
-type MyFunction = unsafe extern "C" fn();
-const DLL_PATH: &str = "src/injected_lib.dll";
-const DLL_ENTRY_POINT: &str = "TestExport";
+const KERNEL_32_DLL: &str = "Kernel32";
+const LOAD_LIBRARY_A_FUNCTION_NAME: &str = "LoadLibraryA";
+
+#[derive(Debug)]
+enum ProgramMode {
+    LoadDll,
+    InjectToProcess,
+}
 
 fn main() {
-    let dll_address = get_dll_address(DLL_PATH);
-    execute_dll(dll_address, DLL_ENTRY_POINT);
-}
+    println!("Please enter program mode (LoadDll or InjectToProcess): ");
 
-fn execute_dll(dll_address: HMODULE, entry_point: &str) {
-    let func_name = CString::new(entry_point).unwrap();
-    let func_name_ptr = func_name.as_bytes_with_nul().as_ptr() as *const u8;
-    let func_nam_pcstr = PCSTR::from_raw(func_name_ptr);
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).unwrap();
 
-    let func: MyFunction = unsafe {
-        let addr_result = GetProcAddress(dll_address, func_nam_pcstr);
-        let addr = match addr_result {
-            Some(addr) => addr,
-            None => {
-                let error_code = GetLastError();
-                panic!("Dll not found:{:?}", error_code);
+    match input.trim().parse::<ProgramMode>() {
+        Ok(mode) => {
+            println!("You selected: {:?}", mode);
+            match mode {
+                ProgramMode::LoadDll => load_dll(),
+                ProgramMode::InjectToProcess => inject_to_process(),
             }
-        };
-        std::mem::transmute(addr)
-    };
-
-    unsafe {
-        func();
+        }
+        Err(_) => println!("Invalid input, please enter 'LoadDll' or 'InjectToProcess'."),
     }
 }
 
-fn get_dll_address(path: &str) -> HMODULE {
-    let current_dir: PathBuf = env::current_dir().unwrap();
-    let mut dll_path = current_dir.clone();
-    dll_path.push(path);
-
-    let dll_path_c = CString::new(dll_path.to_str().unwrap()).unwrap();
-    let dll_path_ptr = dll_path_c.as_bytes_with_nul().as_ptr() as *const u8;
-    let dll_path_pcstr = PCSTR::from_raw(dll_path_ptr);
-    let address_result = unsafe { LoadLibraryA(dll_path_pcstr) };
-    let address = match address_result {
-        Ok(address) => address,
-        Err(e) => {
-            panic!("LoadLibraryA failed {}", e);
+fn inject_to_process() {
+    println!("Please enter process PID:");
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).unwrap();
+    let pid = match input.trim().parse::<u32>() {
+        Ok(p) => p,
+        Err(err) => {
+            eprintln!("PID parsing error: {:?}", err);
+            return;
         }
     };
-    if address_result.is_err() {
-        let error_code = unsafe { GetLastError() };
-        panic!("LoadLibraryA failed with error code: {:?}", error_code);
+    let dll_path = dll::dll_utils::get_dll_path(dll::dll_utils::DLL_PATH);
+    let handler = match unsafe {
+        OpenProcess(
+            PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
+            false,
+            pid,
+        )
+    } {
+        Ok(h) => h,
+        Err(er) => {
+            eprintln!("Cannot open proccess. Error: {:?}", er);
+            return;
+        }
+    };
+    //save dll path to memory
+    let alloc_mem_address = unsafe {
+        VirtualAllocEx(
+            handler,
+            None,
+            8, // size of dll_path
+            MEM_RESERVE | MEM_COMMIT,
+            PAGE_EXECUTE_READWRITE,
+        )
+    };
+    if alloc_mem_address.is_null() {
+        eprintln!("Cannot allocate memory. Error: {:?}", unsafe {
+            GetLastError()
+        });
+        unsafe {
+            let _ = CloseHandle(handler);
+        };
+        return;
     }
-    address
+    let mut bytes_written: usize = 0;
+    let _ = match unsafe {
+        WriteProcessMemory(
+            handler,
+            alloc_mem_address,
+            dll_path as *const c_void,
+            8, // size of dll_path,
+            Some(&mut bytes_written),
+        )
+    } {
+        Ok(_) => {
+            eprintln!("Bytes written: {:?}", bytes_written);
+        }
+        Err(_) => {
+            eprintln!("Failed to write to process memory. Error: {:?}", unsafe {
+                GetLastError()
+            });
+            unsafe {
+                let _ = VirtualFreeEx(handler, alloc_mem_address, 0, MEM_RELEASE);
+            };
+            unsafe {
+                let _ = CloseHandle(handler);
+            };
+            return;
+        }
+    };
+    let kerenl32_ptr = PCWSTR::from_raw(KERNEL_32_DLL.as_ptr() as *const u16);
+    let h_kernel32 = match unsafe { GetModuleHandleW(kerenl32_ptr) } {
+        Ok(h) => {
+            eprintln!("Bytes written: {:?}", bytes_written);
+            h
+        }
+        Err(_) => {
+            eprintln!("Failed to write to load kernel32. Error: {:?}", unsafe {
+                GetLastError()
+            });
+            unsafe {
+                let _ = VirtualFreeEx(handler, alloc_mem_address, 0, MEM_RELEASE);
+            };
+            unsafe {
+                let _ = CloseHandle(handler);
+            };
+            return;
+        }
+    };
+    let load_library_a_ptr = PCSTR::from_raw(LOAD_LIBRARY_A_FUNCTION_NAME.as_ptr());
+
+    let load_library_address = match unsafe { GetProcAddress(h_kernel32, load_library_a_ptr) } {
+        Some(h) => h,
+        None => {
+            eprintln!("Can not get proc address: {}", LOAD_LIBRARY_A_FUNCTION_NAME);
+            unsafe {
+                let _ = VirtualFreeEx(handler, alloc_mem_address, 0, MEM_RELEASE);
+            };
+            unsafe {
+                let _ = CloseHandle(handler);
+            };
+            return;
+        }
+    };
+    //must fix this
+    let h_thread_result = unsafe {
+        CreateRemoteThread(
+            handler,
+            None,
+            0,
+            load_library_address,
+            alloc_mem_address,
+            0,
+            None,
+        )
+    };
+    //wait for thread to finish
 }
 
-#[cfg(test)]
-mod injected_lib_tests {
-    use super::*;
+fn load_dll() {
+    let dll_address = dll::dll_utils::allocate_and_write_dll_address(dll::dll_utils::DLL_PATH);
+    dll::dll_utils::execute_dll(dll_address, dll::dll_utils::DLL_ENTRY_POINT);
+}
 
-    #[test]
-    #[should_panic(
-        expected = "LoadLibraryA failed The specified module could not be found. (0x8007007E)"
-    )]
-    fn test_get_dll_address_panic() {
-        get_dll_address("not existing path");
-    }
+impl FromStr for ProgramMode {
+    type Err = ();
 
-    #[test]
-    fn test_get_dll_address() {
-        get_dll_address(DLL_PATH);
-    }
-
-    #[test]
-    fn test_execute_dll() {
-        execute_dll(get_dll_address(DLL_PATH), DLL_ENTRY_POINT);
-    }
-    #[test]
-    #[should_panic(expected = "Dll not found")]
-    fn test_execute_dll_panic() {
-        execute_dll(get_dll_address(DLL_PATH), "not existing entry point");
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim() {
+            "LoadDll" => Ok(ProgramMode::LoadDll),
+            "InjectToProcess" => Ok(ProgramMode::InjectToProcess),
+            _ => Err(()),
+        }
     }
 }
