@@ -1,11 +1,10 @@
 use std::env;
 use std::ffi::CString;
-use std::path::PathBuf;
 use windows::core::PCSTR;
 use windows::Win32::Foundation::{GetLastError, HMODULE};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 
-pub const DLL_PATH: &str = "src/injected_lib.dll";
+pub const DLL_PATH: &str = "src\\injected_lib.dll";
 pub const DLL_ENTRY_POINT: &str = "TestExport";
 
 type MyFunction = unsafe extern "C" fn();
@@ -32,28 +31,33 @@ pub fn execute_dll(dll_address: HMODULE, entry_point: &str) {
     }
 }
 
-pub fn get_dll_path(path: &str) -> *const u8 {
-    let current_dir: PathBuf = env::current_dir().unwrap();
-    let mut dll_path = current_dir.clone();
-    dll_path.push(path);
-    let dll_path_c = CString::new(dll_path.to_str().unwrap()).unwrap();
-    dll_path_c.as_bytes_with_nul().as_ptr() as *const u8
+pub fn get_dll_path(path: &str) -> CString {
+    let current_dir = env::current_dir().unwrap();
+    let dll_path = current_dir.join(path);
+    let dll_path_str = dll_path
+        .to_str()
+        .expect("Failed to convert path to string")
+        .replace("\\", "/");
+
+    println!("Resolved DLL Path: {}", dll_path_str);
+    CString::new(dll_path_str).expect("Failed to create CString from path")
 }
 
 pub fn allocate_and_write_dll_address(path: &str) -> HMODULE {
-    let dll_path_ptr = get_dll_path(path);
+    let dll_path = get_dll_path(path);
+    let dll_path_ptr = dll_path.as_bytes_with_nul().as_ptr() as *const u8;
     let dll_path_pcstr = PCSTR::from_raw(dll_path_ptr);
     let address_result = unsafe { LoadLibraryA(dll_path_pcstr) };
     let address = match address_result {
         Ok(address) => address,
         Err(e) => {
-            panic!("LoadLibraryA failed {}", e);
+            panic!(
+                "LoadLibraryA failed {}, path: {}",
+                e,
+                dll_path.to_string_lossy()
+            );
         }
     };
-    if address_result.is_err() {
-        let error_code = unsafe { GetLastError() };
-        panic!("LoadLibraryA failed with error code: {:?}", error_code);
-    }
     address
 }
 

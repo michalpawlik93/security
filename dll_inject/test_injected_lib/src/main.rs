@@ -2,14 +2,15 @@ use std::ffi::c_void;
 use std::io;
 use std::str::FromStr;
 use windows::core::{PCSTR, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, GetLastError};
+use windows::Win32::Foundation::{CloseHandle, GetLastError, WAIT_TIMEOUT};
 use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::Memory::{
     VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_EXECUTE_READWRITE,
 };
 use windows::Win32::System::Threading::{
-    CreateRemoteThread, OpenProcess, PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
+    CreateRemoteThread, OpenProcess, WaitForSingleObject, PROCESS_VM_OPERATION, PROCESS_VM_READ,
+    PROCESS_VM_WRITE,
 };
 mod dll;
 
@@ -51,8 +52,10 @@ fn inject_to_process() {
             return;
         }
     };
-    let dll_path = dll::dll_utils::get_dll_path(dll::dll_utils::DLL_PATH);
-    let handler = match unsafe {
+    let dll_path = dll::dll_utils::get_dll_path(dll::dll_utils::DLL_PATH)
+        .as_bytes_with_nul()
+        .as_ptr() as *const u8;
+    let target_process_handler = match unsafe {
         OpenProcess(
             PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
             false,
@@ -66,29 +69,29 @@ fn inject_to_process() {
         }
     };
     //save dll path to memory
-    let alloc_mem_address = unsafe {
+    let dll_path_address = unsafe {
         VirtualAllocEx(
-            handler,
+            target_process_handler,
             None,
             8, // size of dll_path
             MEM_RESERVE | MEM_COMMIT,
             PAGE_EXECUTE_READWRITE,
         )
     };
-    if alloc_mem_address.is_null() {
+    if dll_path_address.is_null() {
         eprintln!("Cannot allocate memory. Error: {:?}", unsafe {
             GetLastError()
         });
         unsafe {
-            let _ = CloseHandle(handler);
+            let _ = CloseHandle(target_process_handler);
         };
         return;
     }
     let mut bytes_written: usize = 0;
     let _ = match unsafe {
         WriteProcessMemory(
-            handler,
-            alloc_mem_address,
+            target_process_handler,
+            dll_path_address,
             dll_path as *const c_void,
             8, // size of dll_path,
             Some(&mut bytes_written),
@@ -102,61 +105,90 @@ fn inject_to_process() {
                 GetLastError()
             });
             unsafe {
-                let _ = VirtualFreeEx(handler, alloc_mem_address, 0, MEM_RELEASE);
+                let _ = VirtualFreeEx(target_process_handler, dll_path_address, 0, MEM_RELEASE);
             };
             unsafe {
-                let _ = CloseHandle(handler);
+                let _ = CloseHandle(target_process_handler);
             };
             return;
         }
     };
     let kerenl32_ptr = PCWSTR::from_raw(KERNEL_32_DLL.as_ptr() as *const u16);
     let h_kernel32 = match unsafe { GetModuleHandleW(kerenl32_ptr) } {
-        Ok(h) => {
-            eprintln!("Bytes written: {:?}", bytes_written);
-            h
-        }
+        Ok(h) => h,
         Err(_) => {
             eprintln!("Failed to write to load kernel32. Error: {:?}", unsafe {
                 GetLastError()
             });
             unsafe {
-                let _ = VirtualFreeEx(handler, alloc_mem_address, 0, MEM_RELEASE);
+                let _ = VirtualFreeEx(target_process_handler, dll_path_address, 0, MEM_RELEASE);
             };
             unsafe {
-                let _ = CloseHandle(handler);
+                let _ = CloseHandle(target_process_handler);
             };
             return;
         }
     };
     let load_library_a_ptr = PCSTR::from_raw(LOAD_LIBRARY_A_FUNCTION_NAME.as_ptr());
 
-    let load_library_address = match unsafe { GetProcAddress(h_kernel32, load_library_a_ptr) } {
+    let load_library_a_address = match unsafe { GetProcAddress(h_kernel32, load_library_a_ptr) } {
         Some(h) => h,
         None => {
             eprintln!("Can not get proc address: {}", LOAD_LIBRARY_A_FUNCTION_NAME);
             unsafe {
-                let _ = VirtualFreeEx(handler, alloc_mem_address, 0, MEM_RELEASE);
+                let _ = VirtualFreeEx(target_process_handler, dll_path_address, 0, MEM_RELEASE);
             };
             unsafe {
-                let _ = CloseHandle(handler);
+                let _ = CloseHandle(target_process_handler);
             };
             return;
         }
     };
-    //must fix this
-    let h_thread_result = unsafe {
+
+    let load_library_func: Option<unsafe extern "system" fn(*mut c_void) -> u32> =
+        unsafe { Some(std::mem::transmute(load_library_a_address)) };
+
+    let thread_handler = match unsafe {
         CreateRemoteThread(
-            handler,
+            target_process_handler,
             None,
             0,
-            load_library_address,
-            alloc_mem_address,
+            load_library_func,
+            Some(dll_path_address),
             0,
             None,
         )
+    } {
+        Ok(h) => h,
+        Err(_) => {
+            eprintln!("Failed to create thread. Error: {:?}", unsafe {
+                GetLastError()
+            });
+            unsafe {
+                let _ = VirtualFreeEx(target_process_handler, dll_path_address, 0, MEM_RELEASE);
+            };
+            unsafe {
+                let _ = CloseHandle(target_process_handler);
+            };
+            return;
+        }
     };
-    //wait for thread to finish
+    let wait_result = unsafe { WaitForSingleObject(thread_handler, 5000) };
+
+    match wait_result {
+        WAIT_TIMEOUT => eprintln!("Thread timed out."),
+        _ => println!("Thread finished."),
+    }
+
+    unsafe {
+        let _ = CloseHandle(thread_handler);
+    };
+    unsafe {
+        let _ = VirtualFreeEx(target_process_handler, dll_path_address, 0, MEM_RELEASE);
+    };
+    unsafe {
+        let _ = CloseHandle(target_process_handler);
+    };
 }
 
 fn load_dll() {
