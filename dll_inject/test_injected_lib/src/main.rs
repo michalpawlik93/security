@@ -1,30 +1,31 @@
-use std::ffi::c_void;
+use std::ffi::{c_void, CString};
 use std::io;
 use std::str::FromStr;
 use windows::core::{PCSTR, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, GetLastError, WAIT_TIMEOUT};
-use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
+use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::Memory::{
     VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_EXECUTE_READWRITE,
 };
 use windows::Win32::System::Threading::{
-    CreateRemoteThread, OpenProcess, WaitForSingleObject, PROCESS_VM_OPERATION, PROCESS_VM_READ,
-    PROCESS_VM_WRITE,
+    CreateRemoteThread, GetExitCodeThread, OpenProcess, WaitForSingleObject, PROCESS_CREATE_THREAD,
+    PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
 };
 mod dll;
 
-const KERNEL_32_DLL: &str = "Kernel32";
+const KERNEL_32_DLL: &str = "kernel32";
 const LOAD_LIBRARY_A_FUNCTION_NAME: &str = "LoadLibraryA";
 
 #[derive(Debug)]
 enum ProgramMode {
-    LoadDll,
+    LoadDllMain,
+    CallDllEntryPoint,
     InjectToProcess,
 }
 
 fn main() {
-    println!("Please enter program mode (LoadDll or InjectToProcess): ");
+    println!("Please enter program mode (LoadDllMain or CallDllEntryPoint or InjectToProcess): ");
 
     let mut input = String::new();
     io::stdin().read_line(&mut input).unwrap();
@@ -33,7 +34,10 @@ fn main() {
         Ok(mode) => {
             println!("You selected: {:?}", mode);
             match mode {
-                ProgramMode::LoadDll => load_dll(),
+                ProgramMode::LoadDllMain => {
+                    dll::dll_utils::allocate_and_write_dll_address(dll::dll_utils::DLL_PATH);
+                }
+                ProgramMode::CallDllEntryPoint => call_dll_entry_point(),
                 ProgramMode::InjectToProcess => inject_to_process(),
             }
         }
@@ -52,12 +56,13 @@ fn inject_to_process() {
             return;
         }
     };
-    let dll_path = dll::dll_utils::get_dll_path(dll::dll_utils::DLL_PATH)
-        .as_bytes_with_nul()
-        .as_ptr() as *const u8;
     let target_process_handler = match unsafe {
         OpenProcess(
-            PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
+            PROCESS_VM_OPERATION
+                | PROCESS_VM_WRITE
+                | PROCESS_VM_READ
+                | PROCESS_CREATE_THREAD
+                | PROCESS_QUERY_INFORMATION,
             false,
             pid,
         )
@@ -68,12 +73,20 @@ fn inject_to_process() {
             return;
         }
     };
+    let dll_path_cstring = dll::dll_utils::get_dll_path(dll::dll_utils::DLL_PATH);
+    let dll_path = dll_path_cstring.as_bytes_with_nul();
+    let dll_path_ptr = dll_path.as_ptr() as *const u8;
     //save dll path to memory
+    println!(
+        "Resolved DLL Path from cstrng: {}",
+        dll_path_cstring.to_str().unwrap()
+    );
+
     let dll_path_address = unsafe {
         VirtualAllocEx(
             target_process_handler,
             None,
-            8, // size of dll_path
+            dll_path.len(),
             MEM_RESERVE | MEM_COMMIT,
             PAGE_EXECUTE_READWRITE,
         )
@@ -92,8 +105,8 @@ fn inject_to_process() {
         WriteProcessMemory(
             target_process_handler,
             dll_path_address,
-            dll_path as *const c_void,
-            8, // size of dll_path,
+            dll_path_ptr as *const c_void,
+            dll_path.len(),
             Some(&mut bytes_written),
         )
     } {
@@ -113,8 +126,39 @@ fn inject_to_process() {
             return;
         }
     };
-    let kerenl32_ptr = PCWSTR::from_raw(KERNEL_32_DLL.as_ptr() as *const u16);
-    let h_kernel32 = match unsafe { GetModuleHandleW(kerenl32_ptr) } {
+
+    let mut buffer = vec![0u8; 1024];
+    let mut bytes_read = 0;
+
+    // Read memory to confirm valid dll path name
+    let success = unsafe {
+        ReadProcessMemory(
+            target_process_handler,
+            dll_path_address,
+            buffer.as_mut_ptr() as *mut c_void,
+            buffer.len(),
+            Some(&mut bytes_read),
+        )
+    };
+
+    match success {
+        Ok(_) => {
+            let output_string =
+                String::from_utf8_lossy((&buffer[..bytes_read as usize])).into_owned();
+            println!("Contents as string: {}", output_string);
+        }
+        Err(err) => {
+            eprintln!("Failed to read memory. Error: {:?}", err);
+        }
+    }
+
+    let module_name_wide: Vec<u16> = KERNEL_32_DLL
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let h_kernel32 = match unsafe { GetModuleHandleW(PCWSTR::from_raw(module_name_wide.as_ptr())) }
+    {
         Ok(h) => h,
         Err(_) => {
             eprintln!("Failed to write to load kernel32. Error: {:?}", unsafe {
@@ -129,12 +173,21 @@ fn inject_to_process() {
             return;
         }
     };
-    let load_library_a_ptr = PCSTR::from_raw(LOAD_LIBRARY_A_FUNCTION_NAME.as_ptr());
 
-    let load_library_a_address = match unsafe { GetProcAddress(h_kernel32, load_library_a_ptr) } {
+    let load_library_function_name = CString::new(LOAD_LIBRARY_A_FUNCTION_NAME).unwrap();
+    let load_library_a_address = match unsafe {
+        GetProcAddress(
+            h_kernel32,
+            PCSTR::from_raw(load_library_function_name.as_ptr() as *const u8),
+        )
+    } {
         Some(h) => h,
         None => {
-            eprintln!("Can not get proc address: {}", LOAD_LIBRARY_A_FUNCTION_NAME);
+            eprintln!(
+                "Can not get proc address: {}. Error:{:?}",
+                LOAD_LIBRARY_A_FUNCTION_NAME,
+                unsafe { GetLastError() }
+            );
             unsafe {
                 let _ = VirtualFreeEx(target_process_handler, dll_path_address, 0, MEM_RELEASE);
             };
@@ -173,11 +226,17 @@ fn inject_to_process() {
             return;
         }
     };
-    let wait_result = unsafe { WaitForSingleObject(thread_handler, 5000) };
+    let wait_result = unsafe { WaitForSingleObject(thread_handler, 10000) };
 
     match wait_result {
         WAIT_TIMEOUT => eprintln!("Thread timed out."),
-        _ => println!("Thread finished."),
+        _ => {
+            let mut exit_code = 0;
+            unsafe {
+                GetExitCodeThread(thread_handler, &mut exit_code);
+            }
+            println!("Thread finished with exit code: {}", exit_code);
+        }
     }
 
     unsafe {
@@ -191,7 +250,7 @@ fn inject_to_process() {
     };
 }
 
-fn load_dll() {
+fn call_dll_entry_point() {
     let dll_address = dll::dll_utils::allocate_and_write_dll_address(dll::dll_utils::DLL_PATH);
     dll::dll_utils::execute_dll(dll_address, dll::dll_utils::DLL_ENTRY_POINT);
 }
@@ -201,7 +260,8 @@ impl FromStr for ProgramMode {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim() {
-            "LoadDll" => Ok(ProgramMode::LoadDll),
+            "LoadDllMain" => Ok(ProgramMode::LoadDllMain),
+            "CallDllEntryPoint" => Ok(ProgramMode::CallDllEntryPoint),
             "InjectToProcess" => Ok(ProgramMode::InjectToProcess),
             _ => Err(()),
         }
