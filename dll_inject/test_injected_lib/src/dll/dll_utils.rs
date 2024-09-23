@@ -1,5 +1,6 @@
 use std::env;
 use std::ffi::CString;
+use std::path::PathBuf;
 use windows::core::PCSTR;
 use windows::Win32::Foundation::{GetLastError, HMODULE};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
@@ -31,34 +32,42 @@ pub fn execute_dll(dll_address: HMODULE, entry_point: &str) {
     }
 }
 
-pub fn get_dll_path(path: &str) -> CString {
-    let current_dir = env::current_dir().unwrap();
-    let dll_path = current_dir.join(path);
+pub fn get_dll_path(path: &str) -> Result<CString, String> {
+    let current_dir =
+        env::current_dir().map_err(|e| format!("Failed to get current directory: {}", e))?;
+
+    let dll_path: PathBuf = current_dir.join(path);
+
     let dll_path_str = dll_path
         .to_str()
-        .expect("Failed to convert path to string")
+        .ok_or_else(|| String::from("Failed to convert path to string"))?
         .replace("\\", "/");
 
-    println!("Resolved DLL Path: {}", dll_path_str);
-    CString::new(dll_path_str).expect("Failed to create CString from path")
+    CString::new(dll_path_str).map_err(|_| String::from("Failed to create CString from path"))
 }
 
-pub fn allocate_and_write_dll_address(path: &str) -> HMODULE {
-    let dll_path = get_dll_path(path);
+pub fn allocate_and_write_dll_address(path: &str) -> Result<HMODULE, String> {
+    let dll_path = match get_dll_path(path) {
+        Ok(p) => p,
+        Err(_) => {
+            return Err(String::from("Failed to create CString from path"));
+        }
+    };
+
     let dll_path_ptr = dll_path.as_bytes_with_nul().as_ptr() as *const u8;
     let dll_path_pcstr = PCSTR::from_raw(dll_path_ptr);
     let address_result = unsafe { LoadLibraryA(dll_path_pcstr) };
     let address = match address_result {
         Ok(address) => address,
         Err(e) => {
-            panic!(
+            return Err(format!(
                 "LoadLibraryA failed {}, path: {}",
                 e,
                 dll_path.to_string_lossy()
-            );
+            ));
         }
     };
-    address
+    Ok(address)
 }
 
 #[cfg(test)]
@@ -66,27 +75,32 @@ mod injected_lib_tests {
     use super::*;
 
     #[test]
-    #[should_panic(
-        expected = "LoadLibraryA failed The specified module could not be found. (0x8007007E)"
-    )]
-    fn test_allocate_and_write_dll_address_panic() {
-        allocate_and_write_dll_address("not existing path");
+    fn test_allocate_and_write_dll_address_cstring_error() {
+        let result = allocate_and_write_dll_address("invalid\0path");
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error, "Failed to create CString from path");
     }
 
     #[test]
     fn test_allocate_and_write_dll_address() {
-        allocate_and_write_dll_address(DLL_PATH);
+        let result = allocate_and_write_dll_address(DLL_PATH);
+        assert!(result.is_ok());
     }
 
     #[test]
     fn test_execute_dll() {
-        execute_dll(allocate_and_write_dll_address(DLL_PATH), DLL_ENTRY_POINT);
+        execute_dll(
+            allocate_and_write_dll_address(DLL_PATH).unwrap(),
+            DLL_ENTRY_POINT,
+        );
     }
     #[test]
     #[should_panic(expected = "Dll not found")]
     fn test_execute_dll_panic() {
         execute_dll(
-            allocate_and_write_dll_address(DLL_PATH),
+            allocate_and_write_dll_address(DLL_PATH).unwrap(),
             "not existing entry point",
         );
     }
