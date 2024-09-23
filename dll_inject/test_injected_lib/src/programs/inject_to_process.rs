@@ -17,7 +17,7 @@ use crate::dll;
 const KERNEL_32_DLL: &str = "kernel32";
 const LOAD_LIBRARY_A_FUNCTION_NAME: &str = "LoadLibraryA";
 
-pub fn inject_dll() {
+pub fn inject_dll(dll_path: &str) {
     println!("Please enter process PID:");
     let mut input = String::new();
     io::stdin().read_line(&mut input).unwrap();
@@ -28,6 +28,10 @@ pub fn inject_dll() {
             return;
         }
     };
+    inject_dll_intern(dll_path, pid);
+}
+
+fn inject_dll_intern(dll_path: &str, pid: u32) {
     let target_process_handler = match unsafe {
         OpenProcess(
             PROCESS_VM_OPERATION
@@ -45,7 +49,7 @@ pub fn inject_dll() {
             return;
         }
     };
-    let dll_path = match dll::dll_utils::get_dll_path(dll::dll_utils::DLL_PATH) {
+    let dll_path = match dll::dll_utils::get_dll_path(dll_path) {
         Ok(p) => p,
         Err(_) => {
             unsafe {
@@ -269,5 +273,15 @@ fn save_dll_path_to_memory(
             }
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod inject_to_process_tests {
+    use super::*;
+
+    #[test]
+    fn inject_dll_intern_no_panic() {
+        let _: () = inject_dll_intern("path", 1320044);
     }
 }

