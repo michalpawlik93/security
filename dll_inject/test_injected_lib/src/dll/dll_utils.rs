@@ -48,26 +48,22 @@ pub fn get_dll_path(path: &str) -> Result<CString, String> {
 }
 
 pub fn allocate_and_write_dll_address(path: &str) -> Result<HMODULE, String> {
-    let dll_path = match get_dll_path(path) {
-        Ok(p) => p,
-        Err(_) => {
-            return Err(String::from("Failed to create CString from path"));
-        }
+    let dll_path =
+        get_dll_path(path).map_err(|_| String::from("Failed to create CString from path"))?;
+
+    let address_result = unsafe {
+        LoadLibraryA(PCSTR::from_raw(
+            dll_path.as_bytes_with_nul().as_ptr() as *const u8
+        ))
     };
 
-    let dll_path_ptr = dll_path.as_bytes_with_nul().as_ptr() as *const u8;
-    let dll_path_pcstr = PCSTR::from_raw(dll_path_ptr);
-    let address_result = unsafe { LoadLibraryA(dll_path_pcstr) };
-    let address = match address_result {
-        Ok(address) => address,
-        Err(e) => {
-            return Err(format!(
-                "LoadLibraryA failed {}, path: {}",
-                e,
-                dll_path.to_string_lossy()
-            ));
-        }
-    };
+    let address = address_result.map_err(|e| {
+        format!(
+            "LoadLibraryA failed {}, path: {}",
+            e,
+            dll_path.to_string_lossy()
+        )
+    })?;
     Ok(address)
 }
 
