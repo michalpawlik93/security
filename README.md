@@ -1,3 +1,7 @@
+
+This application is designed for injecting DLL files into running processes. Upon launching the program, four modes will be presented. Two of these modes load a DLL into the current process, allowing for faster DLL testing. By loading the DLL into the current process, you can diagnose issues more efficiently without needing to log data to an external file. The other two modes are used for injecting a DLL into a different process. The first library, injected_lib.dll, creates a file at a specific path that must be changed in the program before compilation. The second library, keylogger_lib.dll, listens for keyboard inputs and records the information to a file.
+
+Program description: key_logger_lib.dll injection
 You can inject any DLL you like into a running process on your PC. The injected DLL must have the DllMain function as its entry point. DllMain is automatically executed once the DLL is loaded by LoadLibraryA from Kernel32.dll.
 
 You can find Kernel32.dll in YourDrive:\Windows\System32. It is attached to all processes running on your PC with Windows. The path to the injected DLL is stored in a raw memory address, making it possible to read it from another process.
