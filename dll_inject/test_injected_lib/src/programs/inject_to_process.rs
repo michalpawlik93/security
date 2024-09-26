@@ -1,14 +1,14 @@
 use std::ffi::{c_void, CString};
 use std::io;
 use windows::core::{PCSTR, PCWSTR};
-use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, WAIT_TIMEOUT};
+use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
 use windows::Win32::System::Diagnostics::Debug::{ReadProcessMemory, WriteProcessMemory};
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::Memory::{
     VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_EXECUTE_READWRITE,
 };
 use windows::Win32::System::Threading::{
-    CreateRemoteThread, GetExitCodeThread, OpenProcess, WaitForSingleObject, PROCESS_CREATE_THREAD,
+    CreateRemoteThread, OpenProcess, WaitForSingleObject, INFINITE, PROCESS_CREATE_THREAD,
     PROCESS_QUERY_INFORMATION, PROCESS_VM_OPERATION, PROCESS_VM_READ, PROCESS_VM_WRITE,
 };
 
@@ -161,18 +161,7 @@ fn inject_dll_intern(dll_path: &str, pid: u32) {
             return;
         }
     };
-    let wait_result = unsafe { WaitForSingleObject(thread_handler, 10000) };
-
-    match wait_result {
-        WAIT_TIMEOUT => eprintln!("Thread timed out."),
-        _ => {
-            let mut exit_code = 0;
-            unsafe {
-                let _ = GetExitCodeThread(thread_handler, &mut exit_code);
-            }
-            println!("Thread finished with exit code: {}", exit_code);
-        }
-    }
+    let _ = unsafe { WaitForSingleObject(thread_handler, INFINITE) };
 
     unsafe {
         let _ = CloseHandle(thread_handler);
