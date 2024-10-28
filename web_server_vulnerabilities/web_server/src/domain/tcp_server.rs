@@ -136,7 +136,7 @@ fn handle_client_request(socket: &mut TcpStream, socket_id: i32) -> io::Result<(
 mod tests {
     use super::*;
     use crate::domain::global_context::GlobalContext;
-    use mio::net::{TcpListener, TcpStream};
+    use mio::net::TcpListener;
     use mio::{Events, Interest, Poll, Token};
     use std::net::{SocketAddr, TcpStream as StdTcpStream};
     use std::thread;
